@@ -36,17 +36,22 @@ EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 # 🎯 HOW TO SET THE DATE:
 # Option 1: Set to None to scan the MOST RECENT / LATEST trading day.
 # Option 2: Set to a string "YYYY-MM-DD" to scan a specific historical date.
-TARGET_DATE = "2026-08-13"  # Change to "2026-08-13" or None or any date you want to test
+TARGET_DATE = None  # Change to "2026-08-13" or any date you want to test
 
-MOM_THRESHOLD = -10.0
+MOM_THRESHOLD = -5.0
 MIN_AVG_VOLUME_10D = 250000  # Minimum 10-day average volume (250K shares)
+
+# 🚫 HIGH FILTER TOGGLES (Set to True to enable, False to disable)
+USE_5_DAY_HIGH_FILTER = True   # Exclude if close > highest high of previous 5 trading days
+USE_1_MONTH_HIGH_FILTER = True # Exclude if close > highest high of previous ~21 trading days (1 month)
 
 print(f"🎯 Target Date: {'LATEST AVAILABLE' if TARGET_DATE is None else TARGET_DATE}")
 print(f"📧 Email configured: {'YES' if EMAIL_ADDRESS else 'NO'}")
 print(f"🔑 Password configured: {'YES' if EMAIL_APP_PASSWORD else 'NO'}")
 print(f"📊 Min 10-day avg volume: {MIN_AVG_VOLUME_10D:,} shares")
 print(f"📉 MoM filter: <= {MOM_THRESHOLD}%")
-print(f"🚫 5-Day High filter: Exclude if close > highest high of prev 5 days")
+print(f"🚫 5-Day High Filter: {'ACTIVE' if USE_5_DAY_HIGH_FILTER else 'OFF'}")
+print(f"🚫 1-Month High Filter: {'ACTIVE' if USE_1_MONTH_HIGH_FILTER else 'OFF'}")
 print(f"🕐 Timezone handling: US Eastern (auto-adjusts for DST)")
 
 # ──────────────────────────────────────────────────────────────
@@ -156,7 +161,7 @@ def check_ticker(ticker):
         with SuppressStderr():
             ticker_obj = yf.Ticker(ticker)
             
-            # 1. Fetch daily data (2 months to ensure enough history for slicing)
+            # 1. Fetch daily data (2 months to ensure enough history for slicing and 1-month lookback)
             df_daily = ticker_obj.history(period="2mo", interval="1d")
             if df_daily.empty:
                 return {'ticker': ticker, 'status': 'no_data_check', 'result': None}
@@ -167,7 +172,8 @@ def check_ticker(ticker):
                 target_end = pd.to_datetime(TARGET_DATE + " 23:59:59").tz_localize(target_tz)
                 df_daily = df_daily[df_daily.index <= target_end]
             
-            if df_daily.empty or len(df_daily) < 10:
+            # Need at least 25 days to safely support a 21-day (1-month) lookback + current day
+            if df_daily.empty or len(df_daily) < 25:
                 return {'ticker': ticker, 'status': 'insufficient_daily_data', 'result': None}
             
             # 3. Volume Check
@@ -175,17 +181,29 @@ def check_ticker(ticker):
             if avg_volume_10d < MIN_AVG_VOLUME_10D:
                 return {'ticker': ticker, 'status': 'low_volume', 'avg_vol': avg_volume_10d, 'result': None}
             
-            # 🆕 4. NEW FILTER: Must NOT be trading higher than the highest high of the previous 5 trading days
-            # We look at the 5 trading days strictly BEFORE the current/latest day, 
-            # and find the absolute highest high among those 5 days (not just the 5th day's high).
-            last_5_days_prior = df_daily.iloc[-22:-1]
-            highest_high_of_prev_5_days = last_5_days_prior['High'].max()
             latest_close = df_daily['Close'].iloc[-1]
             
-            if latest_close > highest_high_of_prev_5_days:
-                return {'ticker': ticker, 'status': 'new_5d_high', 'result': None}
+            # 🆕 4. 5-DAY HIGH FILTER (Optional)
+            if USE_5_DAY_HIGH_FILTER:
+                # Look at the 5 trading days strictly BEFORE the current/latest day
+                last_5_days_prior = df_daily.iloc[-6:-1]
+                highest_high_of_prev_5_days = last_5_days_prior['High'].max()
+                
+                if latest_close > highest_high_of_prev_5_days:
+                    return {'ticker': ticker, 'status': 'new_5d_high', 'result': None}
             
-            # 5. Fetch 1H data
+            # 🆕 5. 1-MONTH HIGH FILTER (Optional)
+            if USE_1_MONTH_HIGH_FILTER:
+                # Look at the ~21 trading days (1 month) strictly BEFORE the current/latest day
+                # We use min(21, len(df_daily) - 1) to prevent index errors on shorter histories
+                lookback_1m = min(21, len(df_daily) - 1)
+                last_1m_days_prior = df_daily.iloc[-(lookback_1m + 1):-1]
+                highest_high_of_prev_1m = last_1m_days_prior['High'].max()
+                
+                if latest_close > highest_high_of_prev_1m:
+                    return {'ticker': ticker, 'status': 'new_1m_high', 'result': None}
+            
+            # 6. Fetch 1H data
             if TARGET_DATE:
                 # Historical mode: fetch ~1 month prior + 2 day buffer to guarantee target day is captured
                 target_dt = pd.to_datetime(TARGET_DATE)
@@ -199,12 +217,12 @@ def check_ticker(ticker):
             if df_1h.empty or len(df_1h) < 8: 
                 return {'ticker': ticker, 'status': 'insufficient_1h_data', 'result': None}
 
-            # 6. Build 2H bars in US Eastern time (DST-proof)
+            # 7. Build 2H bars in US Eastern time (DST-proof)
             daily_bars = build_daily_2h_bars(df_1h)
             if len(daily_bars) == 0:
                 return {'ticker': ticker, 'status': 'insufficient_2h_data', 'result': None}
 
-            # 7. Find complete days (days with all 4 bars)
+            # 8. Find complete days (days with all 4 bars)
             complete_days = [(date, df_day) for date, df_day in daily_bars.items() if len(df_day) == 4]
             
             if TARGET_DATE:
@@ -220,7 +238,7 @@ def check_ticker(ticker):
                     return {'ticker': ticker, 'status': 'no_complete_days', 'result': None}
                 latest_date, df_day = complete_days[-1]
 
-            # 8. Month-over-Month Calculation (strictly using data up to the latest_date)
+            # 9. Month-over-Month Calculation (strictly using data up to the latest_date)
             all_closes = []
             for date, df_day_all in daily_bars.items():
                 if date <= latest_date:
@@ -236,7 +254,7 @@ def check_ticker(ticker):
             if mom_pct > MOM_THRESHOLD:
                 return {'ticker': ticker, 'status': 'mom_fail', 'mom': mom_pct, 'result': None}
 
-            # 9. Pattern Extraction
+            # 10. Pattern Extraction
             o1, c1, v1 = df_day['Open'].iloc[0], df_day['Close'].iloc[0], df_day['Volume'].iloc[0]
             o2, c2, v2 = df_day['Open'].iloc[1], df_day['Close'].iloc[1], df_day['Volume'].iloc[1]
             o3, c3, v3 = df_day['Open'].iloc[2], df_day['Close'].iloc[2], df_day['Volume'].iloc[2]
