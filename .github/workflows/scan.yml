@@ -1,15 +1,35 @@
-name: Run Scanner
+name: Full US Market Scanner
+
 on:
   schedule:
-    - cron: '0 0,2,4,6,8,10,12,14,16,18,20,22 * * *'
-  workflow_dispatch:
+    # Run 20 minutes after US market close (4:20 PM ET = 20:20 UTC during EDT)
+    # Runs Monday-Friday only (market days)
+    - cron: '20 20 * * 1-5'
+    
+    # Run 2 hours after US market close (6:00 PM ET = 22:00 UTC during EDT)
+    # Runs Monday-Friday only (market days)
+    - cron: '0 22 * * 1-5'
+  
+  workflow_dispatch: # Allows manual runs anytime
+
 jobs:
   scan:
     runs-on: ubuntu-latest
+    
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions/setup-python@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-      - run: pip install yfinance pandas requests
-      - run: python scanner.py
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install yfinance pandas requests
+      
+      - name: Run Scanner
+        env:
+          EMAIL_ADDRESS: ${{ secrets.EMAIL_ADDRESS }}
+          EMAIL_APP_PASSWORD: ${{ secrets.EMAIL_APP_PASSWORD }}
+        run: python scanner.py
