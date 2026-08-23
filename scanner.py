@@ -33,7 +33,7 @@ class SuppressStderr:
 EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS')
 EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
-TARGET_DATE = "2026-08-11"  # Change to "YYYY-MM-DD" or None for latest
+TARGET_DATE = "2026-08-21"  # Change to "YYYY-MM-DD" or None for latest
 
 MOM_THRESHOLD = 100 
 MIN_AVG_VOLUME_10D = 250000  
