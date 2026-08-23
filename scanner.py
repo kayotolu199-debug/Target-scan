@@ -35,7 +35,7 @@ EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
 TARGET_DATE = "2026-08-11"  # Change to "YYYY-MM-DD" or None for latest
 
-MOM_THRESHOLD = 100 
+MOM_THRESHOLD = -5.0 
 MIN_AVG_VOLUME_10D = 250000  
 
 # 💲 PRICE RANGE FILTER
@@ -43,18 +43,18 @@ MIN_PRICE = 0.50
 MAX_PRICE = 50.00  
 
 # 🏢 SECTOR FILTER (Set to None to include ALL sectors)
-TARGET_SECTORS = None  # Example: ['Technology', 'Healthcare']
+TARGET_SECTORS = None  # Example: [TARGET_SECTORS = ['Technology', 'Healthcare', 'Financial Services', 'Consumer Cyclical', 'Consumer Defensive', 'Industrials', 'Energy', 'Basic Materials', 'Real Estate', 'Communication Services', 'Utilities']]
 
 # 🚫 FILTER TOGGLES
 USE_5_DAY_HIGH_FILTER = False
 USE_17_DAY_LOW_FILTER = True
 
-# 🆕 VOLATILITY FILTER CONFIGURATION
-PERCENT_MOVE = 6.0  # 🆕 Change this to adjust the percentage (e.g., 8.0 for 8%)
+# VOLATILITY FILTER CONFIGURATION
+PERCENT_MOVE = 6.0  # Change this to adjust the percentage (e.g., 8.0 for 8%)
 USE_6PCT_IN_14D_FILTER = True  
-USE_6PCT_IN_21D_FILTER = True 
+USE_6PCT_IN_21D_FILTER = False 
 
-# 🆕 RATE LIMITING CONFIGURATION
+# RATE LIMITING CONFIGURATION
 MAX_WORKERS = 2  # Reduced from 5 to 2 to avoid rate limits
 REQUEST_DELAY = 0.05  # 50ms delay between requests
 MAX_RETRIES = 3  # Number of retry attempts for rate-limited requests
@@ -155,7 +155,6 @@ def build_daily_2h_bars(df_1h):
 # STRATEGY LOGIC WITH RATE LIMITING
 # ──────────────────────────────────────────────────────────────
 def check_ticker(ticker):
-    # 🆕 Add delay to avoid rate limits
     time.sleep(REQUEST_DELAY)
     
     for attempt in range(MAX_RETRIES):
@@ -199,6 +198,14 @@ def check_ticker(ticker):
                         if TARGET_SECTORS is not None:
                             return {'ticker': ticker, 'status': 'sector_unknown', 'result': None}
                 
+                # 🆕 Always fetch sector info for display (even if not filtering)
+                if stock_sector is None and TARGET_SECTORS is None:
+                    try:
+                        info = ticker_obj.info
+                        stock_sector = info.get('sector', None)
+                    except Exception:
+                        stock_sector = None
+                
                 # 1. 5-DAY HIGH FILTER (Skips the 2 most recent days)
                 if USE_5_DAY_HIGH_FILTER:
                     if len(df_daily) >= 7:
@@ -216,12 +223,12 @@ def check_ticker(ticker):
                         if latest_close > lowest_low_of_prior_17d:
                             return {'ticker': ticker, 'status': 'above_17d_low', 'result': None}
                 
-                # 3. VOLATILITY FILTERS (6% move) - Track which filters pass
+                # 3. VOLATILITY FILTERS - Track which filters pass
                 vol_filters_passed = []
                 
                 if USE_6PCT_IN_14D_FILTER or USE_6PCT_IN_21D_FILTER:
                     available_data = df_daily
-                    multiplier = 1 + (PERCENT_MOVE / 100)  # 🆕 Use configurable percentage
+                    multiplier = 1 + (PERCENT_MOVE / 100)
                     
                     # Check 14 Days
                     if USE_6PCT_IN_14D_FILTER:
@@ -308,6 +315,7 @@ def check_ticker(ticker):
                 if patA or patB:
                     pattern_type = 'A' if patA else 'B'
                     vol_info = "+".join(vol_filters_passed) if vol_filters_passed else "None"
+                    sector_display = stock_sector if stock_sector else "Unknown"
                     
                     return {
                         'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': pattern_type, 
@@ -320,7 +328,6 @@ def check_ticker(ticker):
                 
         except Exception as e:
             error_msg = str(e)
-            # 🆕 Check for rate limit errors and retry
             if "Too Many Requests" in error_msg or "Rate limited" in error_msg:
                 if attempt < MAX_RETRIES - 1:
                     delay = RETRY_BASE_DELAY * (2 ** attempt)
@@ -340,10 +347,10 @@ def send_alert(ticker, mom_pct, pattern_type, date, avg_vol, sector, vol_filters
     if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD:
         return
     try:
-        sector_text = f"Sector: {sector}\n" if sector else ""
+        sector_text = f"Sector: {sector if sector else 'Unknown'}\n"
         vol_text = f"Volatility Filters Passed: {vol_filters}\n"
         msg = MIMEText(f"Ticker: {ticker}\n{sector_text}Date: {date}\nMoM Change: {mom_pct:.2f}%\nPattern: {pattern_type}\n{vol_text}10-Day Avg Volume: {avg_vol:,.0f} shares\nTime: {datetime.datetime.now()}")
-        msg['Subject'] = f"⚡ REVERSAL SIGNAL: {ticker} (Pattern {pattern_type}, {vol_filters}) on {date}"
+        msg['Subject'] = f"⚡ REVERSAL SIGNAL: {ticker} (Pattern {pattern_type}, {vol_filters}, {sector if sector else 'Unknown'}) on {date}"
         msg['From'] = EMAIL_ADDRESS
         msg['To'] = EMAIL_ADDRESS
         server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
@@ -392,8 +399,8 @@ if __name__ == "__main__":
                     
                     if result_dict['result'] is not None:
                         ticker, mom, pattern_type, date, avg_vol, sector, vol_filters = result_dict['result']
-                        sector_text = f", Sector: {sector}" if sector else ""
-                        print(f"✅ MATCH FOUND: {ticker} on {date} (Pattern: {pattern_type}, Vol: {vol_filters}, MoM: {mom:.2f}%, Avg Vol: {avg_vol:,.0f}{sector_text})")
+                        sector_display = sector if sector else "Unknown"
+                        print(f"✅ MATCH FOUND: {ticker} on {date} (Pattern: {pattern_type}, Vol: {vol_filters}, Sector: {sector_display}, MoM: {mom:.2f}%, Avg Vol: {avg_vol:,.0f})")
                         send_alert(ticker, mom, pattern_type, date, avg_vol, sector, vol_filters)
                         matches.append(result_dict['result'])
                 except Exception as e:
@@ -413,8 +420,8 @@ if __name__ == "__main__":
         print(f"\n📋 Total matches found: {len(matches)}")
         if matches:
             for ticker, mom, pattern_type, date, avg_vol, sector, vol_filters in matches:
-                sector_text = f", Sector: {sector}" if sector else ""
-                print(f"   • {ticker} on {date} (Pattern: {pattern_type}, Vol: {vol_filters}, MoM: {mom:.2f}%, Avg Vol: {avg_vol:,.0f}{sector_text})")
+                sector_display = sector if sector else "Unknown"
+                print(f"   • {ticker} on {date} (Pattern: {pattern_type}, Vol: {vol_filters}, Sector: {sector_display}, MoM: {mom:.2f}%, Avg Vol: {avg_vol:,.0f})")
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
