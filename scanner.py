@@ -33,14 +33,15 @@ class SuppressStderr:
 EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS')
 EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
-TARGET_DATE = None  # Change to "YYYY-MM-DD" or None for latest
+TARGET_DATE = "2026-08-11"  # Change to "YYYY-MM-DD" or None for latest
 
-MOM_THRESHOLD = 100
-MIN_AVG_VOLUME_10D = 250000  
+MOM_THRESHOLD = 100.0
+MIN_AVG_VOLUME_10D = 250000
 
 # 🚫 FILTER TOGGLES
-USE_5_DAY_HIGH_FILTER = False   # Exclude if close > highest high of the 5 days prior to the 2 most recent days
-USE_17_DAY_LOW_FILTER = True   # Exclude if close > lowest low of the 17 days PRIOR to that 5-day window
+USE_5_DAY_HIGH_FILTER = False
+USE_17_DAY_LOW_FILTER = True
+USE_6PCT_IN_21D_FILTER = True
 
 print(f"🎯 Target Date: {'LATEST AVAILABLE' if TARGET_DATE is None else TARGET_DATE}")
 print(f"📧 Email configured: {'YES' if EMAIL_ADDRESS else 'NO'}")
@@ -49,6 +50,7 @@ print(f"📊 Min 10-day avg volume: {MIN_AVG_VOLUME_10D:,} shares")
 print(f"📉 MoM filter: <= {MOM_THRESHOLD}%")
 print(f"🚫 5-Day High Filter (skips 2 recent days): {'ACTIVE' if USE_5_DAY_HIGH_FILTER else 'OFF'}")
 print(f"🚫 17-Day Low Filter: {'ACTIVE' if USE_17_DAY_LOW_FILTER else 'OFF'}")
+print(f"🚫 6% in 21 Days Filter: {'ACTIVE' if USE_6PCT_IN_21D_FILTER else 'OFF'}")
 print(f"🕐 Timezone handling: US Eastern (auto-adjusts for DST)")
 
 # ──────────────────────────────────────────────────────────────
@@ -57,7 +59,7 @@ print(f"🕐 Timezone handling: US Eastern (auto-adjusts for DST)")
 def get_all_us_tickers():
     print("📡 Fetching master list from official exchange data feeds...")
     all_tickers = []
-    
+
     try:
         nasdaq_url = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
         response = requests.get(nasdaq_url, timeout=15)
@@ -96,7 +98,7 @@ def get_all_us_tickers():
         if t.endswith(('W', 'U', 'R', 'P', 'WS', 'WT', 'WI')): continue
         if len(t) < 1 or len(t) > 5 or t.isdigit(): continue
         filtered_tickers.append(t)
-    
+
     filtered_tickers.sort()
     print(f"✅ After filtering: {len(filtered_tickers)} valid common stocks (no ETFs)")
     return filtered_tickers
@@ -110,7 +112,7 @@ def build_daily_2h_bars(df_1h):
         df_1h = df_1h.tz_localize('US/Eastern')
     else:
         df_1h = df_1h.tz_convert('US/Eastern')
-    
+
     for date, group in df_1h.groupby(df_1h.index.date):
         bars_2h = []
         for hours, time_str in [([9, 10], '09:30'), ([11, 12], '11:30'), ([13, 14], '13:30'), ([15], '15:30')]:
@@ -135,47 +137,73 @@ def check_ticker(ticker):
     try:
         with SuppressStderr():
             ticker_obj = yf.Ticker(ticker)
-            df_daily = ticker_obj.history(period="2mo", interval="1d")
+
+            # Fetch 6 months of data
+            df_daily = ticker_obj.history(period="6mo", interval="1d")
             if df_daily.empty:
                 return {'ticker': ticker, 'status': 'no_data_check', 'result': None}
-            
+
             if TARGET_DATE:
                 target_tz = df_daily.index.tz or 'US/Eastern'
                 target_end = pd.to_datetime(TARGET_DATE + " 23:59:59").tz_localize(target_tz)
                 df_daily = df_daily[df_daily.index <= target_end]
-            
-            # Need at least 25 days: 17 (lookback) + 5 (window) + 2 (skipped recent) + 1 (buffer)
-            if df_daily.empty or len(df_daily) < 25:
+
+            # 🆕 CHANGED: Need at least 60 days of data
+            if df_daily.empty or len(df_daily) < 60:
                 return {'ticker': ticker, 'status': 'insufficient_daily_data', 'result': None}
-            
+
             avg_volume_10d = df_daily['Volume'].tail(10).mean()
             if avg_volume_10d < MIN_AVG_VOLUME_10D:
                 return {'ticker': ticker, 'status': 'low_volume', 'avg_vol': avg_volume_10d, 'result': None}
-            
+
             latest_close = df_daily['Close'].iloc[-1]
-            
-            # 🆕 1. 5-DAY HIGH FILTER (Skips the 2 most recent days: today and yesterday)
+
+            # 1. 5-DAY HIGH FILTER (Skips the 2 most recent days)
             if USE_5_DAY_HIGH_FILTER:
-                # Indices -7 to -2 represent the 5 trading days prior to the 2 most recent days.
-                # This skips today [-1] and yesterday [-2], then looks at the 5 days before that.
-                prior_5_days = df_daily.iloc[-7:-2]
-                highest_high_of_prior_5_days = prior_5_days['High'].max()
-                
-                if latest_close > highest_high_of_prior_5_days:
-                    return {'ticker': ticker, 'status': 'above_5d_high', 'result': None}
-            
-            # 🆕 2. 17-DAY LOW FILTER (Exclusive to the 17 days PRIOR to the 5-day window)
+                if len(df_daily) >= 7:
+                    prior_5_days = df_daily.iloc[-7:-2]
+                    highest_high_of_prior_5_days = prior_5_days['High'].max()
+
+                    if latest_close > highest_high_of_prior_5_days:
+                        return {'ticker': ticker, 'status': 'above_5d_high', 'result': None}
+
+            # 2. 17-DAY LOW FILTER
             if USE_17_DAY_LOW_FILTER:
-                lookback_17d = min(17, len(df_daily) - 7)
-                # Slice from -(lookback_17d + 7) up to -7. 
-                # Example: if lookback_17d is 17, slice is [-24:-7]. Exactly 17 days, ending right before the 5-day window.
-                prior_17_days = df_daily.iloc[-(lookback_17d + 7):-7]
-                lowest_low_of_prior_17d = prior_17_days['Low'].min()
-                
-                if latest_close > lowest_low_of_prior_17d:
-                    return {'ticker': ticker, 'status': 'above_17d_low', 'result': None}
-            
-            # 3. Fetch 1H data
+                if len(df_daily) >= 24:  # Need at least 17 + 7 days
+                    lookback_17d = min(17, len(df_daily) - 7)
+                    prior_17_days = df_daily.iloc[-(lookback_17d + 7):-7]
+                    lowest_low_of_prior_17d = prior_17_days['Low'].min()
+
+                    if latest_close > lowest_low_of_prior_17d:
+                        return {'ticker': ticker, 'status': 'above_17d_low', 'result': None}
+
+            # 3. 6% IN 21 DAYS VOLATILITY FILTER
+            if USE_6PCT_IN_21D_FILTER:
+                found_6pct_move = False
+
+                # Use all available data up to 6 months
+                available_data = df_daily
+
+                # For each day's low, check if any of the next 21 days has a high >= low * 1.06
+                for i in range(len(available_data) - 1):
+                    current_low = available_data['Low'].iloc[i]
+
+                    # Look ahead up to 21 days (or until end of data)
+                    lookahead_end = min(i + 22, len(available_data))
+                    future_highs = available_data['High'].iloc[i+1:lookahead_end]
+
+                    if len(future_highs) > 0:
+                        max_future_high = future_highs.max()
+
+                        # Check if the future high is at least 6% above the current low
+                        if max_future_high >= current_low * 1.06:
+                            found_6pct_move = True
+                            break
+
+                if not found_6pct_move:
+                    return {'ticker': ticker, 'status': 'no_6pct_in_21d', 'result': None}
+
+            # 4. Fetch 1H data
             if TARGET_DATE:
                 target_dt = pd.to_datetime(TARGET_DATE)
                 start_date = (target_dt - pd.Timedelta(days=35)).strftime('%Y-%m-%d')
@@ -183,8 +211,8 @@ def check_ticker(ticker):
                 df_1h = ticker_obj.history(start=start_date, end=end_date, interval="1h")
             else:
                 df_1h = ticker_obj.history(period="1mo", interval="1h")
-            
-            if df_1h.empty or len(df_1h) < 8: 
+
+            if df_1h.empty or len(df_1h) < 8:
                 return {'ticker': ticker, 'status': 'insufficient_1h_data', 'result': None}
 
             daily_bars = build_daily_2h_bars(df_1h)
@@ -192,7 +220,7 @@ def check_ticker(ticker):
                 return {'ticker': ticker, 'status': 'insufficient_2h_data', 'result': None}
 
             complete_days = [(date, df_day) for date, df_day in daily_bars.items() if len(df_day) == 4]
-            
+
             if TARGET_DATE:
                 target_date_obj = pd.to_datetime(TARGET_DATE).date()
                 valid_days = [(date, df_day) for date, df_day in complete_days if date <= target_date_obj]
@@ -208,10 +236,10 @@ def check_ticker(ticker):
             for date, df_day_all in daily_bars.items():
                 if date <= latest_date:
                     all_closes.extend(df_day_all['Close'].tolist())
-            
+
             if len(all_closes) < 2:
                 return {'ticker': ticker, 'status': 'insufficient_mom_data', 'result': None}
-            
+
             mom_pct = ((all_closes[-1] - all_closes[0]) / all_closes[0]) * 100
             if mom_pct > MOM_THRESHOLD:
                 return {'ticker': ticker, 'status': 'mom_fail', 'mom': mom_pct, 'result': None}
@@ -229,14 +257,14 @@ def check_ticker(ticker):
 
             if patA or patB:
                 return {
-                    'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': 'A' if patA else 'B', 
+                    'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': 'A' if patA else 'B',
                     'date': str(latest_date), 'avg_vol': avg_volume_10d,
                     'result': (ticker, mom_pct, 'A' if patA else 'B', latest_date, avg_volume_10d)
                 }
-            
+
             return {'ticker': ticker, 'status': 'no_pattern', 'mom': mom_pct, 'result': None}
     except Exception as e:
-        return {'ticker': ticker, 'status': 'error', 'error': str(e), 'result': None}
+        return {'ticker': ticker, 'status': 'error', 'error': str(e)[:100], 'result': None}
 
 # ──────────────────────────────────────────────────────────────
 # EMAIL ALERT LOGIC
@@ -266,19 +294,20 @@ if __name__ == "__main__":
         mode_text = "LATEST DATE" if TARGET_DATE is None else f"HISTORICAL DATE ({TARGET_DATE})"
         print(f"🔍 Starting Full US Market Scanner ({mode_text} MODE)...")
         print(f"⏰ Start time: {datetime.datetime.now()}")
-        
+
         tickers = get_all_us_tickers()
         if len(tickers) == 0:
             print("❌ No tickers found. Exiting.")
             sys.exit(1)
-        
+
         print(f"\n🚀 Scanning {len(tickers)} US stocks with 5 threads...\n")
-        
+
         matches = []
         start_time = time.time()
         processed = 0
         status_counts = defaultdict(int)
-        
+        error_samples = []
+
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_ticker = {executor.submit(check_ticker, ticker): ticker for ticker in tickers}
             for future in as_completed(future_to_ticker):
@@ -288,12 +317,16 @@ if __name__ == "__main__":
                 try:
                     result_dict = future.result()
                     status_counts[result_dict['status']] += 1
+
+                    if result_dict['status'] == 'error' and len(error_samples) < 5:
+                        error_samples.append(f"{result_dict['ticker']}: {result_dict.get('error', 'Unknown')}")
+
                     if result_dict['result'] is not None:
                         ticker, mom, pattern_type, date, avg_vol = result_dict['result']
                         print(f"✅ MATCH FOUND: {ticker} on {date} (MoM: {mom:.2f}%, Pattern: {pattern_type}, Avg Vol: {avg_vol:,.0f})")
                         send_alert(ticker, mom, pattern_type, date, avg_vol)
                         matches.append(result_dict['result'])
-                except Exception:
+                except Exception as e:
                     status_counts['exception'] += 1
 
         print(f"\n🏁 Scan complete in {time.time() - start_time:.0f} seconds.")
@@ -301,6 +334,12 @@ if __name__ == "__main__":
         print(f"   Total stocks scanned: {len(tickers)}")
         for status, count in sorted(status_counts.items()):
             print(f"   {status}: {count}")
+
+        if error_samples:
+            print(f"\n⚠️  Sample Errors (first 5):")
+            for err in error_samples:
+                print(f"   {err}")
+
         print(f"\n📋 Total matches found: {len(matches)}")
         if matches:
             for ticker, mom, pattern_type, date, avg_vol in matches:
