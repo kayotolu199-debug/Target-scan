@@ -35,13 +35,15 @@ EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
 TARGET_DATE = "2026-08-11"  # Change to "YYYY-MM-DD" or None for latest
 
-# Note: Set to -5.0 to enforce a downtrend. (100.0 effectively disables this check)
-MOM_THRESHOLD = -5.0 
+MOM_THRESHOLD = 100 
 MIN_AVG_VOLUME_10D = 250000  
 
-# 🆕 PRICE RANGE FILTER (Set to None to disable)
-MIN_PRICE = 0.50   # Minimum stock price (e.g., $0.50)
-MAX_PRICE = 10.00  # Maximum stock price (e.g., $10.00)
+# 💲 PRICE RANGE FILTER
+MIN_PRICE = 0.50   
+MAX_PRICE = 50.00  
+
+# 🏢 SECTOR FILTER (Set to None to include ALL sectors)
+TARGET_SECTORS = None  # Example: ['Technology', 'Healthcare']
 
 # 🚫 FILTER TOGGLES
 USE_5_DAY_HIGH_FILTER = False
@@ -49,27 +51,19 @@ USE_17_DAY_LOW_FILTER = True
 
 # Volatility Filters (Can be used independently or together)
 USE_6PCT_IN_14D_FILTER = True  
-USE_6PCT_IN_21D_FILTER = False 
+USE_6PCT_IN_21D_FILTER = True 
 
 print(f"🎯 Target Date: {'LATEST AVAILABLE' if TARGET_DATE is None else TARGET_DATE}")
 print(f"📧 Email configured: {'YES' if EMAIL_ADDRESS else 'NO'}")
 print(f"🔑 Password configured: {'YES' if EMAIL_APP_PASSWORD else 'NO'}")
 print(f"📊 Min 10-day avg volume: {MIN_AVG_VOLUME_10D:,} shares")
 print(f"💲 Price Range: ${MIN_PRICE:.2f} - ${MAX_PRICE:.2f}")
+print(f"🏢 Sector Filter: {', '.join(TARGET_SECTORS) if TARGET_SECTORS else 'ALL SECTORS'}")
 print(f"📉 MoM filter: <= {MOM_THRESHOLD}%")
 print(f"🚫 5-Day High Filter (skips 2 recent days): {'ACTIVE' if USE_5_DAY_HIGH_FILTER else 'OFF'}")
 print(f"🚫 17-Day Low Filter: {'ACTIVE' if USE_17_DAY_LOW_FILTER else 'OFF'}")
-
-# Consolidated Volatility Print
-vol_filters = []
-if USE_6PCT_IN_14D_FILTER: vol_filters.append("14-Day")
-if USE_6PCT_IN_21D_FILTER: vol_filters.append("21-Day")
-
-if vol_filters:
-    print(f"🚫 Volatility Filter(s) ACTIVE: {', '.join(vol_filters)} (Requires 6% move)")
-else:
-    print("🚫 Volatility Filter(s): OFF")
-
+print(f"🚫 6% in 14 Days Filter: {'ACTIVE (Requires 6% move within 14 trading days)' if USE_6PCT_IN_14D_FILTER else 'OFF'}")
+print(f"🚫 6% in 21 Days Filter: {'ACTIVE (Requires 6% move within 21 trading days)' if USE_6PCT_IN_21D_FILTER else 'OFF'}")
 print(f"🕐 Timezone handling: US Eastern (auto-adjusts for DST)")
 
 # ──────────────────────────────────────────────────────────────
@@ -167,7 +161,6 @@ def check_ticker(ticker):
                 target_end = pd.to_datetime(TARGET_DATE + " 23:59:59").tz_localize(target_tz)
                 df_daily = df_daily[df_daily.index <= target_end]
             
-            # Need at least 60 days of data
             if df_daily.empty or len(df_daily) < 60:
                 return {'ticker': ticker, 'status': 'insufficient_daily_data', 'result': None}
             
@@ -177,9 +170,22 @@ def check_ticker(ticker):
             
             latest_close = df_daily['Close'].iloc[-1]
             
-            # 🆕 PRICE RANGE FILTER
+            # PRICE RANGE FILTER
             if latest_close < MIN_PRICE or latest_close > MAX_PRICE:
                 return {'ticker': ticker, 'status': 'outside_price_range', 'result': None}
+            
+            # SECTOR FILTER
+            stock_sector = None
+            if TARGET_SECTORS is not None:
+                try:
+                    info = ticker_obj.info
+                    stock_sector = info.get('sector', 'Unknown')
+                    
+                    if stock_sector and stock_sector not in TARGET_SECTORS:
+                        return {'ticker': ticker, 'status': 'wrong_sector', 'sector': stock_sector, 'result': None}
+                except Exception:
+                    if TARGET_SECTORS is not None:
+                        return {'ticker': ticker, 'status': 'sector_unknown', 'result': None}
             
             # 1. 5-DAY HIGH FILTER (Skips the 2 most recent days)
             if USE_5_DAY_HIGH_FILTER:
@@ -198,7 +204,9 @@ def check_ticker(ticker):
                     if latest_close > lowest_low_of_prior_17d:
                         return {'ticker': ticker, 'status': 'above_17d_low', 'result': None}
             
-            # 3. VOLATILITY FILTERS (6% move)
+            # 3. VOLATILITY FILTERS (6% move) - Track which filters pass
+            vol_filters_passed = []
+            
             if USE_6PCT_IN_14D_FILTER or USE_6PCT_IN_21D_FILTER:
                 available_data = df_daily
                 
@@ -214,6 +222,8 @@ def check_ticker(ticker):
                             break
                     if not found_14d:
                         return {'ticker': ticker, 'status': 'no_6pct_in_14d', 'result': None}
+                    else:
+                        vol_filters_passed.append("14D")
                 
                 # Check 21 Days
                 if USE_6PCT_IN_21D_FILTER:
@@ -227,6 +237,8 @@ def check_ticker(ticker):
                             break
                     if not found_21d:
                         return {'ticker': ticker, 'status': 'no_6pct_in_21d', 'result': None}
+                    else:
+                        vol_filters_passed.append("21D")
             
             # 4. Fetch 1H data
             if TARGET_DATE:
@@ -281,10 +293,14 @@ def check_ticker(ticker):
             patB = r1 and r2 and r3 and g4 and (v1 > v2) and (v2 > v3) and (v3 > v4)
 
             if patA or patB:
+                pattern_type = 'A' if patA else 'B'
+                vol_info = "+".join(vol_filters_passed) if vol_filters_passed else "None"
+                
                 return {
-                    'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': 'A' if patA else 'B', 
-                    'date': str(latest_date), 'avg_vol': avg_volume_10d,
-                    'result': (ticker, mom_pct, 'A' if patA else 'B', latest_date, avg_volume_10d)
+                    'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': pattern_type, 
+                    'date': str(latest_date), 'avg_vol': avg_volume_10d, 'sector': stock_sector,
+                    'vol_filters': vol_info,
+                    'result': (ticker, mom_pct, pattern_type, latest_date, avg_volume_10d, stock_sector, vol_info)
                 }
             
             return {'ticker': ticker, 'status': 'no_pattern', 'mom': mom_pct, 'result': None}
@@ -294,12 +310,14 @@ def check_ticker(ticker):
 # ──────────────────────────────────────────────────────────────
 # EMAIL ALERT LOGIC
 # ──────────────────────────────────────────────────────────────
-def send_alert(ticker, mom_pct, pattern_type, date, avg_vol):
+def send_alert(ticker, mom_pct, pattern_type, date, avg_vol, sector, vol_filters):
     if not EMAIL_ADDRESS or not EMAIL_APP_PASSWORD:
         return
     try:
-        msg = MIMEText(f"Ticker: {ticker}\nDate: {date}\nMoM Change: {mom_pct:.2f}%\nPattern: {pattern_type}\n10-Day Avg Volume: {avg_vol:,.0f} shares\nTime: {datetime.datetime.now()}")
-        msg['Subject'] = f"⚡ REVERSAL SIGNAL: {ticker} (Pattern {pattern_type}) on {date}"
+        sector_text = f"Sector: {sector}\n" if sector else ""
+        vol_text = f"Volatility Filters Passed: {vol_filters}\n"
+        msg = MIMEText(f"Ticker: {ticker}\n{sector_text}Date: {date}\nMoM Change: {mom_pct:.2f}%\nPattern: {pattern_type}\n{vol_text}10-Day Avg Volume: {avg_vol:,.0f} shares\nTime: {datetime.datetime.now()}")
+        msg['Subject'] = f"⚡ REVERSAL SIGNAL: {ticker} (Pattern {pattern_type}, {vol_filters}) on {date}"
         msg['From'] = EMAIL_ADDRESS
         msg['To'] = EMAIL_ADDRESS
         server = smtplib.SMTP('smtp.gmail.com', 587, timeout=10)
@@ -347,9 +365,10 @@ if __name__ == "__main__":
                         error_samples.append(f"{result_dict['ticker']}: {result_dict.get('error', 'Unknown')}")
                     
                     if result_dict['result'] is not None:
-                        ticker, mom, pattern_type, date, avg_vol = result_dict['result']
-                        print(f"✅ MATCH FOUND: {ticker} on {date} (MoM: {mom:.2f}%, Pattern: {pattern_type}, Avg Vol: {avg_vol:,.0f})")
-                        send_alert(ticker, mom, pattern_type, date, avg_vol)
+                        ticker, mom, pattern_type, date, avg_vol, sector, vol_filters = result_dict['result']
+                        sector_text = f", Sector: {sector}" if sector else ""
+                        print(f"✅ MATCH FOUND: {ticker} on {date} (Pattern: {pattern_type}, Vol: {vol_filters}, MoM: {mom:.2f}%, Avg Vol: {avg_vol:,.0f}{sector_text})")
+                        send_alert(ticker, mom, pattern_type, date, avg_vol, sector, vol_filters)
                         matches.append(result_dict['result'])
                 except Exception as e:
                     status_counts['exception'] += 1
@@ -367,8 +386,9 @@ if __name__ == "__main__":
         
         print(f"\n📋 Total matches found: {len(matches)}")
         if matches:
-            for ticker, mom, pattern_type, date, avg_vol in matches:
-                print(f"   • {ticker} on {date} (MoM: {mom:.2f}%, Pattern: {pattern_type}, Avg Vol: {avg_vol:,.0f})")
+            for ticker, mom, pattern_type, date, avg_vol, sector, vol_filters in matches:
+                sector_text = f", Sector: {sector}" if sector else ""
+                print(f"   • {ticker} on {date} (Pattern: {pattern_type}, Vol: {vol_filters}, MoM: {mom:.2f}%, Avg Vol: {avg_vol:,.0f}{sector_text})")
         sys.exit(0)
     except Exception as e:
         print(f"\n❌ FATAL ERROR: {e}")
