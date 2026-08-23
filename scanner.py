@@ -40,10 +40,10 @@ MIN_AVG_VOLUME_10D = 250000
 
 # 💲 PRICE RANGE FILTER
 MIN_PRICE = 0.50   
-MAX_PRICE = 50.00  
+MAX_PRICE = 50000.00  
 
 # 🏢 SECTOR FILTER (Set to None to include ALL sectors)
-TARGET_SECTORS = None  # Example: [TARGET_SECTORS = ['Technology', 'Healthcare', 'Financial Services', 'Consumer Cyclical', 'Consumer Defensive', 'Industrials', 'Energy', 'Basic Materials', 'Real Estate', 'Communication Services', 'Utilities']]
+TARGET_SECTORS = 'Technology', 'Healthcare','Industrials','Communication Services'  # Example: [TARGET_SECTORS = ['Technology', 'Healthcare', 'Financial Services', 'Consumer Cyclical', 'Consumer Defensive', 'Industrials', 'Energy', 'Basic Materials', 'Real Estate', 'Communication Services', 'Utilities']]
 
 # 🚫 FILTER TOGGLES
 USE_5_DAY_HIGH_FILTER = False
