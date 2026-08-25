@@ -33,32 +33,32 @@ class SuppressStderr:
 EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS')
 EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD')
 
-TARGET_DATE = "2026-08-21"  # Change to "YYYY-MM-DD" or None for latest
+TARGET_DATE = None  # Change to "YYYY-MM-DD" or None for latest
 
-MOM_THRESHOLD = 100 
-MIN_AVG_VOLUME_10D = 250000  
+MOM_THRESHOLD = 100.0  # Note: Added .0 to ensure it's treated as a float
+MIN_AVG_VOLUME_10D = 250000
 
 # 💲 PRICE RANGE FILTER
-MIN_PRICE = 0.30   
-MAX_PRICE = 50000.00  
+MIN_PRICE = 0.50
+MAX_PRICE = 50000.00
 
-# 🏢 SECTOR FILTER (Set to None to include ALL sectors)
-TARGET_SECTORS = 'Technology', 'Healthcare', 'Consumer Cyclical', 'Financial Services', 'Industrials', 'Energy', 'Basic Materials'  # Example: [TARGET_SECTORS = ['Technology', 'Healthcare', 'Financial Services', 'Consumer Cyclical', 'Consumer Defensive', 'Industrials', 'Energy', 'Basic Materials', 'Real Estate', 'Communication Services', 'Utilities']]
+# 🏢 SECTOR FILTER (Added [] to make it a proper list)
+TARGET_SECTORS = ['Technology', 'Healthcare', 'Consumer Cyclical', 'Financial Services', 'Industrials', 'Energy', 'Basic Materials']
 
 # 🚫 FILTER TOGGLES
 USE_5_DAY_HIGH_FILTER = False
 USE_17_DAY_LOW_FILTER = True
 
 # VOLATILITY FILTER CONFIGURATION
-PERCENT_MOVE = 6.0  # Change this to adjust the percentage (e.g., 8.0 for 8%)
-USE_6PCT_IN_14D_FILTER = True  
-USE_6PCT_IN_21D_FILTER = False 
+PERCENT_MOVE = 6.0
+USE_6PCT_IN_14D_FILTER = True
+USE_6PCT_IN_21D_FILTER = False
 
 # RATE LIMITING CONFIGURATION
-MAX_WORKERS = 2  # Reduced from 5 to 2 to avoid rate limits
-REQUEST_DELAY = 0.05  # 50ms delay between requests
-MAX_RETRIES = 3  # Number of retry attempts for rate-limited requests
-RETRY_BASE_DELAY = 2  # Base delay in seconds for exponential backoff
+MAX_WORKERS = 2
+REQUEST_DELAY = 0.05
+MAX_RETRIES = 3
+RETRY_BASE_DELAY = 2
 
 print(f"🎯 Target Date: {'LATEST AVAILABLE' if TARGET_DATE is None else TARGET_DATE}")
 print(f"📧 Email configured: {'YES' if EMAIL_ADDRESS else 'NO'}")
@@ -80,7 +80,7 @@ print(f"⚡ Rate Limiting: {MAX_WORKERS} threads, {REQUEST_DELAY*1000:.0f}ms del
 def get_all_us_tickers():
     print("📡 Fetching master list from official exchange data feeds...")
     all_tickers = []
-    
+
     try:
         nasdaq_url = "http://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt"
         response = requests.get(nasdaq_url, timeout=15)
@@ -119,7 +119,7 @@ def get_all_us_tickers():
         if t.endswith(('W', 'U', 'R', 'P', 'WS', 'WT', 'WI')): continue
         if len(t) < 1 or len(t) > 5 or t.isdigit(): continue
         filtered_tickers.append(t)
-    
+
     filtered_tickers.sort()
     print(f"✅ After filtering: {len(filtered_tickers)} valid common stocks (no ETFs)")
     return filtered_tickers
@@ -133,7 +133,7 @@ def build_daily_2h_bars(df_1h):
         df_1h = df_1h.tz_localize('US/Eastern')
     else:
         df_1h = df_1h.tz_convert('US/Eastern')
-    
+
     for date, group in df_1h.groupby(df_1h.index.date):
         bars_2h = []
         for hours, time_str in [([9, 10], '09:30'), ([11, 12], '11:30'), ([13, 14], '13:30'), ([15], '15:30')]:
@@ -156,65 +156,58 @@ def build_daily_2h_bars(df_1h):
 # ──────────────────────────────────────────────────────────────
 def check_ticker(ticker):
     time.sleep(REQUEST_DELAY)
-    
+
     for attempt in range(MAX_RETRIES):
         try:
             with SuppressStderr():
                 ticker_obj = yf.Ticker(ticker)
-                
-                # Fetch 6 months of data
+
                 df_daily = ticker_obj.history(period="6mo", interval="1d")
                 if df_daily.empty:
                     return {'ticker': ticker, 'status': 'no_data_check', 'result': None}
-                
+
                 if TARGET_DATE:
                     target_tz = df_daily.index.tz or 'US/Eastern'
                     target_end = pd.to_datetime(TARGET_DATE + " 23:59:59").tz_localize(target_tz)
                     df_daily = df_daily[df_daily.index <= target_end]
-                
+
                 if df_daily.empty or len(df_daily) < 60:
                     return {'ticker': ticker, 'status': 'insufficient_daily_data', 'result': None}
-                
+
                 avg_volume_10d = df_daily['Volume'].tail(10).mean()
                 if avg_volume_10d < MIN_AVG_VOLUME_10D:
                     return {'ticker': ticker, 'status': 'low_volume', 'avg_vol': avg_volume_10d, 'result': None}
-                
+
                 latest_close = df_daily['Close'].iloc[-1]
-                
-                # PRICE RANGE FILTER
+
                 if latest_close < MIN_PRICE or latest_close > MAX_PRICE:
                     return {'ticker': ticker, 'status': 'outside_price_range', 'result': None}
-                
-                # SECTOR FILTER
+
                 stock_sector = None
                 if TARGET_SECTORS is not None:
                     try:
                         info = ticker_obj.info
                         stock_sector = info.get('sector', 'Unknown')
-                        
                         if stock_sector and stock_sector not in TARGET_SECTORS:
                             return {'ticker': ticker, 'status': 'wrong_sector', 'sector': stock_sector, 'result': None}
                     except Exception:
                         if TARGET_SECTORS is not None:
                             return {'ticker': ticker, 'status': 'sector_unknown', 'result': None}
-                
-                # 🆕 Always fetch sector info for display (even if not filtering)
+
                 if stock_sector is None and TARGET_SECTORS is None:
                     try:
                         info = ticker_obj.info
                         stock_sector = info.get('sector', None)
                     except Exception:
                         stock_sector = None
-                
-                # 1. 5-DAY HIGH FILTER (Skips the 2 most recent days)
+
                 if USE_5_DAY_HIGH_FILTER:
                     if len(df_daily) >= 7:
                         prior_5_days = df_daily.iloc[-7:-2]
                         highest_high_of_prior_5_days = prior_5_days['High'].max()
                         if latest_close > highest_high_of_prior_5_days:
                             return {'ticker': ticker, 'status': 'above_5d_high', 'result': None}
-                
-                # 2. 17-DAY LOW FILTER
+
                 if USE_17_DAY_LOW_FILTER:
                     if len(df_daily) >= 24:
                         lookback_17d = min(17, len(df_daily) - 7)
@@ -222,15 +215,13 @@ def check_ticker(ticker):
                         lowest_low_of_prior_17d = prior_17_days['Low'].min()
                         if latest_close > lowest_low_of_prior_17d:
                             return {'ticker': ticker, 'status': 'above_17d_low', 'result': None}
-                
-                # 3. VOLATILITY FILTERS - Track which filters pass
+
                 vol_filters_passed = []
-                
+
                 if USE_6PCT_IN_14D_FILTER or USE_6PCT_IN_21D_FILTER:
                     available_data = df_daily
                     multiplier = 1 + (PERCENT_MOVE / 100)
-                    
-                    # Check 14 Days
+
                     if USE_6PCT_IN_14D_FILTER:
                         found_14d = False
                         for i in range(len(available_data) - 1):
@@ -244,8 +235,7 @@ def check_ticker(ticker):
                             return {'ticker': ticker, 'status': f'no_{PERCENT_MOVE}pct_in_14d', 'result': None}
                         else:
                             vol_filters_passed.append("14D")
-                    
-                    # Check 21 Days
+
                     if USE_6PCT_IN_21D_FILTER:
                         found_21d = False
                         for i in range(len(available_data) - 1):
@@ -259,8 +249,7 @@ def check_ticker(ticker):
                             return {'ticker': ticker, 'status': f'no_{PERCENT_MOVE}pct_in_21d', 'result': None}
                         else:
                             vol_filters_passed.append("21D")
-                
-                # 4. Fetch 1H data
+
                 if TARGET_DATE:
                     target_dt = pd.to_datetime(TARGET_DATE)
                     start_date = (target_dt - pd.Timedelta(days=35)).strftime('%Y-%m-%d')
@@ -268,8 +257,8 @@ def check_ticker(ticker):
                     df_1h = ticker_obj.history(start=start_date, end=end_date, interval="1h")
                 else:
                     df_1h = ticker_obj.history(period="1mo", interval="1h")
-                
-                if df_1h.empty or len(df_1h) < 8: 
+
+                if df_1h.empty or len(df_1h) < 8:
                     return {'ticker': ticker, 'status': 'insufficient_1h_data', 'result': None}
 
                 daily_bars = build_daily_2h_bars(df_1h)
@@ -277,7 +266,7 @@ def check_ticker(ticker):
                     return {'ticker': ticker, 'status': 'insufficient_2h_data', 'result': None}
 
                 complete_days = [(date, df_day) for date, df_day in daily_bars.items() if len(df_day) == 4]
-                
+
                 if TARGET_DATE:
                     target_date_obj = pd.to_datetime(TARGET_DATE).date()
                     valid_days = [(date, df_day) for date, df_day in complete_days if date <= target_date_obj]
@@ -293,10 +282,10 @@ def check_ticker(ticker):
                 for date, df_day_all in daily_bars.items():
                     if date <= latest_date:
                         all_closes.extend(df_day_all['Close'].tolist())
-                
+
                 if len(all_closes) < 2:
                     return {'ticker': ticker, 'status': 'insufficient_mom_data', 'result': None}
-                
+
                 mom_pct = ((all_closes[-1] - all_closes[0]) / all_closes[0]) * 100
                 if mom_pct > MOM_THRESHOLD:
                     return {'ticker': ticker, 'status': 'mom_fail', 'mom': mom_pct, 'result': None}
@@ -309,6 +298,7 @@ def check_ticker(ticker):
                 g1, g2, g3, g4 = c1 > o1, c2 > o2, c3 > o3, c4 > o4
                 r1, r2, r3, r4 = c1 < o1, c2 < o2, c3 < o3, c4 < o4
 
+                # ✅ CLEAN ORIGINAL PATTERNS (No arbitrary volume ratios)
                 patA = g2 and g3 and (v3 > v2)
                 patB = r1 and r2 and r3 and g4 and (v1 > v2) and (v2 > v3) and (v3 > v4)
 
@@ -316,16 +306,16 @@ def check_ticker(ticker):
                     pattern_type = 'A' if patA else 'B'
                     vol_info = "+".join(vol_filters_passed) if vol_filters_passed else "None"
                     sector_display = stock_sector if stock_sector else "Unknown"
-                    
+
                     return {
-                        'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': pattern_type, 
+                        'ticker': ticker, 'status': 'match', 'mom': mom_pct, 'pattern': pattern_type,
                         'date': str(latest_date), 'avg_vol': avg_volume_10d, 'sector': stock_sector,
                         'vol_filters': vol_info,
                         'result': (ticker, mom_pct, pattern_type, latest_date, avg_volume_10d, stock_sector, vol_info)
                     }
-                
+
                 return {'ticker': ticker, 'status': 'no_pattern', 'mom': mom_pct, 'result': None}
-                
+
         except Exception as e:
             error_msg = str(e)
             if "Too Many Requests" in error_msg or "Rate limited" in error_msg:
@@ -337,7 +327,7 @@ def check_ticker(ticker):
                     return {'ticker': ticker, 'status': 'error', 'error': f'Rate limited after {MAX_RETRIES} retries', 'result': None}
             else:
                 return {'ticker': ticker, 'status': 'error', 'error': error_msg[:100], 'result': None}
-    
+
     return {'ticker': ticker, 'status': 'error', 'error': 'Max retries exceeded', 'result': None}
 
 # ──────────────────────────────────────────────────────────────
@@ -370,20 +360,20 @@ if __name__ == "__main__":
         mode_text = "LATEST DATE" if TARGET_DATE is None else f"HISTORICAL DATE ({TARGET_DATE})"
         print(f"🔍 Starting Full US Market Scanner ({mode_text} MODE)...")
         print(f"⏰ Start time: {datetime.datetime.now()}")
-        
+
         tickers = get_all_us_tickers()
         if len(tickers) == 0:
             print("❌ No tickers found. Exiting.")
             sys.exit(1)
-        
+
         print(f"\n🚀 Scanning {len(tickers)} US stocks with {MAX_WORKERS} threads...\n")
-        
+
         matches = []
         start_time = time.time()
         processed = 0
         status_counts = defaultdict(int)
         error_samples = []
-        
+
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             future_to_ticker = {executor.submit(check_ticker, ticker): ticker for ticker in tickers}
             for future in as_completed(future_to_ticker):
@@ -393,10 +383,10 @@ if __name__ == "__main__":
                 try:
                     result_dict = future.result()
                     status_counts[result_dict['status']] += 1
-                    
+
                     if result_dict['status'] == 'error' and len(error_samples) < 5:
                         error_samples.append(f"{result_dict['ticker']}: {result_dict.get('error', 'Unknown')}")
-                    
+
                     if result_dict['result'] is not None:
                         ticker, mom, pattern_type, date, avg_vol, sector, vol_filters = result_dict['result']
                         sector_display = sector if sector else "Unknown"
@@ -411,12 +401,12 @@ if __name__ == "__main__":
         print(f"   Total stocks scanned: {len(tickers)}")
         for status, count in sorted(status_counts.items()):
             print(f"   {status}: {count}")
-        
+
         if error_samples:
             print(f"\n⚠️  Sample Errors (first 5):")
             for err in error_samples:
                 print(f"   {err}")
-        
+
         print(f"\n📋 Total matches found: {len(matches)}")
         if matches:
             for ticker, mom, pattern_type, date, avg_vol, sector, vol_filters in matches:
